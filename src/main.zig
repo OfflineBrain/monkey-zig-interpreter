@@ -1,4 +1,5 @@
 const std = @import("std");
+const lx = @import("lexer.zig");
 
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)

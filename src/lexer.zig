@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Token = union(enum) {
+pub const Token = union(enum) {
     assign,
     plus,
     minus,
@@ -49,6 +49,52 @@ const Token = union(enum) {
             break :blk k;
         } else .{ .ident = ident };
     }
+
+    pub fn format(
+        self: Token,
+        comptime fmt: []const u8,
+        oppions: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = oppions;
+
+        const literal: []const u8 = switch (self) {
+            .assign => "=",
+            .plus => "+",
+            .minus => "-",
+            .asterisk => "*",
+            .slash => "/",
+            .bang => "!",
+            .comma => ",",
+            .dot => ".",
+            .colon => ":",
+            .semicolon => ";",
+            .lparen => "(",
+            .rparen => ")",
+            .lbrase => "{",
+            .rbrace => "}",
+            .gt => ">",
+            .gte => ">=",
+            .lt => "<",
+            .lte => "<=",
+            .eq => "==",
+            .noteq => "!.",
+            .if_literal => "if",
+            .else_literal => "else",
+            .return_literal => "return",
+            .let_literal => "let",
+            .fn_literal => "fn",
+            .true_literal => "true",
+            .false_literal => "false",
+            .eof => "eof",
+            .illegal => "illegal",
+            .int => self.int,
+            .ident => self.ident,
+        };
+
+        try writer.writeAll(literal);
+    }
 };
 
 fn isLetter(ch: u8) bool {
@@ -56,7 +102,7 @@ fn isLetter(ch: u8) bool {
 }
 
 fn isInt(ch: u8) bool {
-    return std.ascii.isDigit(ch) or ch == '_';
+    return std.ascii.isDigit(ch);
 }
 
 pub const Lexer = struct {
@@ -260,6 +306,35 @@ test "lexer" {
         .{ .int = "1" },
         .gte,
         .{ .int = "11" },
+        .semicolon,
+        .eof,
+    };
+
+    var lexer = Lexer.init(input);
+
+    for (output) |expected_token| {
+        const actual_token = lexer.nextToken();
+
+        try std.testing.expectEqualDeep(expected_token, actual_token);
+    }
+}
+
+test "if (x < y) { x } else { y }" {
+    const input = "if (x < y) { x } else { y };";
+    const output = [_]Token{
+        .if_literal,
+        .lparen,
+        .{ .ident = "x" },
+        .lt,
+        .{ .ident = "y" },
+        .rparen,
+        .lbrase,
+        .{ .ident = "x" },
+        .rbrace,
+        .else_literal,
+        .lbrase,
+        .{ .ident = "y" },
+        .rbrace,
         .semicolon,
         .eof,
     };
