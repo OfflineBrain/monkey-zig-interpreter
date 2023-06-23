@@ -95,6 +95,10 @@ pub const Token = union(enum) {
 
         try writer.writeAll(literal);
     }
+
+    pub fn tag(self: Token) []const u8 {
+        return @tagName(self);
+    }
 };
 
 fn isLetter(ch: u8) bool {
@@ -346,4 +350,10 @@ test "if (x < y) { x } else { y }" {
 
         try std.testing.expectEqualDeep(expected_token, actual_token);
     }
+}
+
+test "tag" {
+    const token = Token{ .ident = "abc" };
+
+    try std.testing.expectEqualStrings("ident", token.tag());
 }
