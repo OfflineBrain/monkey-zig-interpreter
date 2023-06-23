@@ -23,6 +23,7 @@ const Statement = union(enum) {
 
 const Expression = union(enum) {
     identifier: Identifier,
+    integer: Integer,
     default,
     fn deinit(self: Expression, a: std.mem.Allocator) void {
         _ = a;
@@ -115,10 +116,27 @@ const ExpressionStatement = struct {
 };
 
 const Identifier = struct {
+    const Self = @This();
     token: l.Token,
 
     pub fn format(
-        self: Identifier,
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("{s}", .{self.token});
+    }
+};
+
+const Integer = struct {
+    const Self = @This();
+    token: l.Token,
+
+    pub fn format(
+        self: Self,
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
@@ -171,6 +189,7 @@ pub const Parser = struct {
         };
 
         try p.prefixFn.put("ident", &parseIdentifier);
+        try p.prefixFn.put("int", &parseInteger);
 
         p.nextToken();
         p.nextToken();
@@ -267,6 +286,10 @@ pub const Parser = struct {
         return Expression{ .identifier = Identifier{ .token = self.curr_t } };
     }
 
+    fn parseInteger(self: *Self) !Expression {
+        return Expression{ .integer = Integer{ .token = self.curr_t } };
+    }
+
     fn expectPeek(self: *Self, tag: []const u8) !bool {
         if (std.mem.eql(u8, self.peek_t.tag(), tag)) {
             self.nextToken();
@@ -294,10 +317,10 @@ fn letStatement(a: std.mem.Allocator, identifier: []const u8) !Statement {
     return Statement{ .let_statement = statement };
 }
 
-fn exprStatement(a: std.mem.Allocator, value: []const u8) !Statement {
+fn exprStatement(a: std.mem.Allocator, value: Expression) !Statement {
     var statement = try a.create(ExpressionStatement);
 
-    statement.value = Expression{ .identifier = Identifier{ .token = l.Token{ .ident = value } } };
+    statement.value = value;
 
     return Statement{ .expr_statement = statement };
 }
@@ -319,6 +342,9 @@ test "let statement" {
     const statements_len: u64 = @as(u64, program.statements.items.len);
     const expected_len: u64 = 3;
     try t.expectEqual(expected_len, statements_len);
+
+    const errors_len: u64 = @as(u64, parser.errors.items.len);
+    try t.expect(errors_len == 0);
 
     const expected_statements = [_]Statement{
         try letStatement(t_allocator, "x"),
@@ -358,7 +384,42 @@ test "identifier" {
     try t.expect(statements_len == 1);
 
     const expected_statements = [_]Statement{
-        try exprStatement(t_allocator, "foobar"),
+        try exprStatement(t_allocator, Expression{ .identifier = Identifier{ .token = l.Token{ .ident = "foobar" } } }),
+    };
+
+    defer for (expected_statements) |value| {
+        value.deinit(t_allocator);
+        switch (value) {
+            .expr_statement => |stmt| {
+                t_allocator.destroy(stmt);
+            },
+            else => unreachable,
+        }
+    };
+
+    for (program.statements.items, 0..) |value, idx| {
+        try t.expectEqualDeep(expected_statements[idx].expr_statement, value.expr_statement);
+    }
+}
+
+test "integers" {
+    const input = "5;";
+
+    var lex = l.Lexer.init(input);
+    var parser = try Parser.init(t_allocator, lex);
+    defer parser.deinit();
+
+    var program = try parser.parse();
+    defer program.destroy();
+
+    const statements_len: u64 = @as(u64, program.statements.items.len);
+    const errors_len: u64 = @as(u64, parser.errors.items.len);
+
+    try t.expect(errors_len == 0);
+    try t.expect(statements_len == 1);
+
+    const expected_statements = [_]Statement{
+        try exprStatement(t_allocator, Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } }),
     };
 
     defer for (expected_statements) |value| {
