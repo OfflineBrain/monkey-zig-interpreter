@@ -10,24 +10,51 @@ const Statement = union(enum) {
         switch (self) {
             .let_statement => |value| {
                 value.deinit(a);
+                a.destroy(value);
             },
             .return_statement => |value| {
                 value.deinit(a);
+                a.destroy(value);
             },
             .expr_statement => |value| {
                 value.deinit(a);
+                a.destroy(value);
             },
         }
     }
 };
 
 const Expression = union(enum) {
+    const Self = @This();
+
     identifier: Identifier,
     integer: Integer,
+    prefix: *PrefixExpression,
     default,
     fn deinit(self: Expression, a: std.mem.Allocator) void {
-        _ = a;
-        _ = self;
+        switch (self) {
+            .prefix => |expr| {
+                expr.deinit(a);
+                a.destroy(expr);
+            },
+            else => {},
+        }
+    }
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        switch (self) {
+            .prefix => |e| try writer.print("{s}", .{e}),
+            .integer => |e| try writer.print("{s}", .{e}),
+            .identifier => |e| try writer.print("{s}", .{e}),
+            else => try writer.print("DEFAULT", .{}),
+        }
     }
 };
 
@@ -39,17 +66,6 @@ const Program = struct {
         defer program.statements.deinit();
         defer for (program.statements.items) |value| {
             value.deinit(t_allocator);
-            switch (value) {
-                .let_statement => |stmt| {
-                    t_allocator.destroy(stmt);
-                },
-                .return_statement => |stmt| {
-                    t_allocator.destroy(stmt);
-                },
-                .expr_statement => |stmt| {
-                    t_allocator.destroy(stmt);
-                },
-            }
         };
     }
 };
@@ -147,6 +163,27 @@ const Integer = struct {
     }
 };
 
+const PrefixExpression = struct {
+    const Self = @This();
+    operator: l.Token,
+    right: Expression,
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("({s}{s})", .{ self.operator, self.right });
+    }
+
+    fn deinit(self: Self, a: std.mem.Allocator) void {
+        self.right.deinit(a);
+    }
+};
+
 const Err = error{
     Parse,
     UnexpectedToken,
@@ -190,6 +227,8 @@ pub const Parser = struct {
 
         try p.prefixFn.put("ident", &parseIdentifier);
         try p.prefixFn.put("int", &parseInteger);
+        try p.prefixFn.put("bang", &parsePrefixExpression);
+        try p.prefixFn.put("minus", &parsePrefixExpression);
 
         p.nextToken();
         p.nextToken();
@@ -290,6 +329,17 @@ pub const Parser = struct {
         return Expression{ .integer = Integer{ .token = self.curr_t } };
     }
 
+    fn parsePrefixExpression(self: *Self) !Expression {
+        var expr = try self.allocator.create(PrefixExpression);
+        expr.operator = self.curr_t;
+
+        self.nextToken();
+
+        expr.right = try self.parseExpression(.prefix);
+
+        return Expression{ .prefix = expr };
+    }
+
     fn expectPeek(self: *Self, tag: []const u8) !bool {
         if (std.mem.eql(u8, self.peek_t.tag(), tag)) {
             self.nextToken();
@@ -354,16 +404,10 @@ test "let statement" {
 
     defer for (expected_statements) |value| {
         value.deinit(t_allocator);
-        switch (value) {
-            .let_statement => |stmt| {
-                t_allocator.destroy(stmt);
-            },
-            else => unreachable,
-        }
     };
 
     for (program.statements.items, 0..) |value, idx| {
-        try t.expectEqualDeep(expected_statements[idx].let_statement, value.let_statement);
+        try expectEqualDeep(expected_statements[idx].let_statement, value.let_statement);
     }
 }
 
@@ -389,16 +433,10 @@ test "identifier" {
 
     defer for (expected_statements) |value| {
         value.deinit(t_allocator);
-        switch (value) {
-            .expr_statement => |stmt| {
-                t_allocator.destroy(stmt);
-            },
-            else => unreachable,
-        }
     };
 
     for (program.statements.items, 0..) |value, idx| {
-        try t.expectEqualDeep(expected_statements[idx].expr_statement, value.expr_statement);
+        try expectEqualDeep(expected_statements[idx].expr_statement, value.expr_statement);
     }
 }
 
@@ -424,15 +462,235 @@ test "integers" {
 
     defer for (expected_statements) |value| {
         value.deinit(t_allocator);
-        switch (value) {
-            .expr_statement => |stmt| {
-                t_allocator.destroy(stmt);
-            },
-            else => unreachable,
-        }
     };
 
     for (program.statements.items, 0..) |value, idx| {
-        try t.expectEqualDeep(expected_statements[idx].expr_statement, value.expr_statement);
+        try expectEqualDeep(expected_statements[idx].expr_statement, value.expr_statement);
+    }
+}
+
+fn testPrefixExpression(
+    input: []const u8,
+    expected: Statement,
+) !void {
+    var lex = l.Lexer.init(input);
+    var parser = try Parser.init(t_allocator, lex);
+    defer parser.deinit();
+
+    var program = try parser.parse();
+    defer program.destroy();
+
+    const statements_len: u64 = @as(u64, program.statements.items.len);
+    const errors_len: u64 = @as(u64, parser.errors.items.len);
+
+    try t.expect(errors_len == 0);
+    try t.expect(statements_len == 1);
+
+    try expectEqualDeep(expected, program.statements.items[0]);
+}
+
+test "prefix expression" {
+    const input = [_][]const u8{ "!5;", "-15;" };
+    const expected = [_]Statement{
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = try t_allocator.create(PrefixExpression);
+                expr.operator = l.Token.bang;
+                expr.right = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = Expression{ .prefix = expr };
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = try t_allocator.create(PrefixExpression);
+                expr.operator = l.Token.minus;
+                expr.right = Expression{ .integer = Integer{ .token = l.Token{ .int = "15" } } };
+                stmt.value = Expression{ .prefix = expr };
+                break :blk stmt;
+            },
+        },
+    };
+
+    defer for (expected) |stmt| {
+        stmt.deinit(t_allocator);
+    };
+
+    for (input, 0..) |value, i| {
+        try testPrefixExpression(value, expected[i]);
+    }
+}
+
+pub fn expectEqualDeep(expected: anytype, actual: @TypeOf(expected)) error{TestExpectedEqual}!void {
+    switch (@typeInfo(@TypeOf(actual))) {
+        .NoReturn,
+        .Opaque,
+        .Frame,
+        .AnyFrame,
+        => @compileError("value of type " ++ @typeName(@TypeOf(actual)) ++ " encountered"),
+
+        .Undefined,
+        .Null,
+        .Void,
+        => return,
+
+        .Type => {
+            if (actual != expected) {
+                std.debug.print("expected type {s}, found type {s}\n", .{ @typeName(expected), @typeName(actual) });
+                return error.TestExpectedEqual;
+            }
+        },
+
+        .Bool,
+        .Int,
+        .Float,
+        .ComptimeFloat,
+        .ComptimeInt,
+        .EnumLiteral,
+        .Enum,
+        .Fn,
+        .ErrorSet,
+        => {
+            if (actual != expected) {
+                std.debug.print("expected {}, found {}\n", .{ expected, actual });
+                return error.TestExpectedEqual;
+            }
+        },
+
+        .Pointer => |pointer| {
+            switch (pointer.size) {
+                // We have no idea what is behind those pointers, so the best we can do is `==` check.
+                .C, .Many => {
+                    if (actual != expected) {
+                        std.debug.print("expected {*}, found {*}\n", .{ expected, actual });
+                        return error.TestExpectedEqual;
+                    }
+                },
+                .One => {
+                    // Length of those pointers are runtime value, so the best we can do is `==` check.
+                    switch (@typeInfo(pointer.child)) {
+                        .Fn, .Opaque => {
+                            if (actual != expected) {
+                                std.debug.print("expected {*}, found {*}\n", .{ expected, actual });
+                                return error.TestExpectedEqual;
+                            }
+                        },
+                        else => try expectEqualDeep(expected.*, actual.*),
+                    }
+                },
+                .Slice => {
+                    if (expected.len != actual.len) {
+                        std.debug.print("Slice len not the same, expected {d}, found {d}\n", .{ expected.len, actual.len });
+                        return error.TestExpectedEqual;
+                    }
+                    var i: usize = 0;
+                    while (i < expected.len) : (i += 1) {
+                        expectEqualDeep(expected[i], actual[i]) catch |e| {
+                            std.debug.print("index {d} incorrect. expected {any}, found {any}\n", .{
+                                i, expected[i], actual[i],
+                            });
+                            return e;
+                        };
+                    }
+                },
+            }
+        },
+
+        .Array => |_| {
+            if (expected.len != actual.len) {
+                std.debug.print("Array len not the same, expected {d}, found {d}\n", .{ expected.len, actual.len });
+                return error.TestExpectedEqual;
+            }
+            var i: usize = 0;
+            while (i < expected.len) : (i += 1) {
+                expectEqualDeep(expected[i], actual[i]) catch |e| {
+                    std.debug.print("index {d} incorrect. expected {any}, found {any}\n", .{
+                        i, expected[i], actual[i],
+                    });
+                    return e;
+                };
+            }
+        },
+
+        .Vector => |info| {
+            if (info.len != @typeInfo(@TypeOf(actual)).Vector.len) {
+                std.debug.print("Vector len not the same, expected {d}, found {d}\n", .{ info.len, @typeInfo(@TypeOf(actual)).Vector.len });
+                return error.TestExpectedEqual;
+            }
+            var i: usize = 0;
+            while (i < info.len) : (i += 1) {
+                expectEqualDeep(expected[i], actual[i]) catch |e| {
+                    std.debug.print("index {d} incorrect. expected {any}, found {any}\n", .{
+                        i, expected[i], actual[i],
+                    });
+                    return e;
+                };
+            }
+        },
+
+        .Struct => |structType| {
+            inline for (structType.fields) |field| {
+                expectEqualDeep(@field(expected, field.name), @field(actual, field.name)) catch |e| {
+                    std.debug.print("Field {s} incorrect. expected {any}, found {any}\n", .{ field.name, @field(expected, field.name), @field(actual, field.name) });
+                    return e;
+                };
+            }
+        },
+
+        .Union => |union_info| {
+            if (union_info.tag_type == null) {
+                @compileError("Unable to compare untagged union values");
+            }
+
+            const Tag = std.meta.Tag(@TypeOf(expected));
+
+            const expectedTag = @as(Tag, expected);
+            const actualTag = @as(Tag, actual);
+
+            try t.expectEqual(expectedTag, actualTag);
+
+            // we only reach this loop if the tags are equal
+            switch (expected) {
+                inline else => |val, tag| {
+                    try expectEqualDeep(val, @field(actual, @tagName(tag)));
+                },
+            }
+        },
+
+        .Optional => {
+            if (expected) |expected_payload| {
+                if (actual) |actual_payload| {
+                    try expectEqualDeep(expected_payload, actual_payload);
+                } else {
+                    std.debug.print("expected {any}, found null\n", .{expected_payload});
+                    return error.TestExpectedEqual;
+                }
+            } else {
+                if (actual) |actual_payload| {
+                    std.debug.print("expected null, found {any}\n", .{actual_payload});
+                    return error.TestExpectedEqual;
+                }
+            }
+        },
+
+        .ErrorUnion => {
+            if (expected) |expected_payload| {
+                if (actual) |actual_payload| {
+                    try expectEqualDeep(expected_payload, actual_payload);
+                } else |actual_err| {
+                    std.debug.print("expected {any}, found {any}\n", .{ expected_payload, actual_err });
+                    return error.TestExpectedEqual;
+                }
+            } else |expected_err| {
+                if (actual) |actual_payload| {
+                    std.debug.print("expected {any}, found {any}\n", .{ expected_err, actual_payload });
+                    return error.TestExpectedEqual;
+                } else |actual_err| {
+                    try expectEqualDeep(expected_err, actual_err);
+                }
+            }
+        },
     }
 }
