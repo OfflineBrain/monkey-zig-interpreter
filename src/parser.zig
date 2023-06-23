@@ -22,6 +22,21 @@ const Statement = union(enum) {
             },
         }
     }
+
+    pub fn format(
+        self: Statement,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        switch (self) {
+            .let_statement => |e| try writer.print("{s}", .{e}),
+            .return_statement => |e| try writer.print("{s}", .{e}),
+            .expr_statement => |e| try writer.print("{s}", .{e}),
+        }
+    }
 };
 
 const Expression = union(enum) {
@@ -30,10 +45,15 @@ const Expression = union(enum) {
     identifier: Identifier,
     integer: Integer,
     prefix: *PrefixExpression,
+    infix: *InfixExpression,
     default,
     fn deinit(self: Expression, a: std.mem.Allocator) void {
         switch (self) {
             .prefix => |expr| {
+                expr.deinit(a);
+                a.destroy(expr);
+            },
+            .infix => |expr| {
                 expr.deinit(a);
                 a.destroy(expr);
             },
@@ -50,9 +70,10 @@ const Expression = union(enum) {
         _ = options;
         _ = fmt;
         switch (self) {
-            .prefix => |e| try writer.print("{s}", .{e}),
-            .integer => |e| try writer.print("{s}", .{e}),
             .identifier => |e| try writer.print("{s}", .{e}),
+            .integer => |e| try writer.print("{s}", .{e}),
+            .prefix => |e| try writer.print("{s}", .{e}),
+            .infix => |e| try writer.print("{s}", .{e}),
             else => try writer.print("DEFAULT", .{}),
         }
     }
@@ -67,6 +88,20 @@ const Program = struct {
         defer for (program.statements.items) |value| {
             value.deinit(t_allocator);
         };
+    }
+
+    pub fn format(
+        self: Program,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+
+        for (self.statements.items) |value| {
+            try writer.print("{s}", .{value});
+        }
     }
 };
 
@@ -184,6 +219,29 @@ const PrefixExpression = struct {
     }
 };
 
+const InfixExpression = struct {
+    const Self = @This();
+    operator: l.Token,
+    left: Expression,
+    right: Expression,
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("({s} {s} {s})", .{ self.left, self.operator, self.right });
+    }
+
+    fn deinit(self: Self, a: std.mem.Allocator) void {
+        self.left.deinit(a);
+        self.right.deinit(a);
+    }
+};
+
 const Err = error{
     Parse,
     UnexpectedToken,
@@ -201,7 +259,21 @@ const Presedence = enum(u8) {
     product,
     prefix,
     call,
+
+    fn int(self: Presedence) u8 {
+        return @intFromEnum(self);
+    }
 };
+
+fn mapPresedence(token: l.Token) Presedence {
+    return switch (token) {
+        .eq, .noteq => .equals,
+        .lt, .lte, .gt, .gte => .ltgt,
+        .plus, .minus => .sum,
+        .asterisk, .slash => .product,
+        else => .lowest,
+    };
+}
 
 pub const Parser = struct {
     const Self = @This();
@@ -229,6 +301,17 @@ pub const Parser = struct {
         try p.prefixFn.put("int", &parseInteger);
         try p.prefixFn.put("bang", &parsePrefixExpression);
         try p.prefixFn.put("minus", &parsePrefixExpression);
+
+        try p.infixFn.put("plus", &parseInfixExpression);
+        try p.infixFn.put("minus", &parseInfixExpression);
+        try p.infixFn.put("asterisk", &parseInfixExpression);
+        try p.infixFn.put("slash", &parseInfixExpression);
+        try p.infixFn.put("eq", &parseInfixExpression);
+        try p.infixFn.put("noteq", &parseInfixExpression);
+        try p.infixFn.put("lt", &parseInfixExpression);
+        try p.infixFn.put("lte", &parseInfixExpression);
+        try p.infixFn.put("gt", &parseInfixExpression);
+        try p.infixFn.put("gte", &parseInfixExpression);
 
         p.nextToken();
         p.nextToken();
@@ -300,7 +383,7 @@ pub const Parser = struct {
     fn parseExpressionStatement(self: *Self) !Statement {
         const expr = try self.parseExpression(.lowest);
 
-        while (self.curr_t != l.Token.semicolon) {
+        while (self.curr_t != l.Token.semicolon and self.curr_t != l.Token.eof) {
             self.nextToken();
         }
 
@@ -310,7 +393,6 @@ pub const Parser = struct {
     }
 
     fn parseExpression(self: *Self, presedence: Presedence) !Expression {
-        _ = presedence;
         const prefix = self.prefixFn.get(self.curr_t.tag());
         var left = if (prefix) |func| blk: {
             break :blk try func(self);
@@ -318,6 +400,17 @@ pub const Parser = struct {
             return Expression.default;
         };
 
+        while (self.peek_t != l.Token.semicolon and presedence.int() < self.peekPresedence().int()) {
+            const infix = self.infixFn.get(self.peek_t.tag());
+            left = if (infix) |func| blk: {
+                self.nextToken();
+                break :blk try func(self, left);
+            } else {
+                return Expression.default;
+            };
+        }
+
+        // std.debug.print("{s}\n", .{left});
         return left;
     }
 
@@ -340,6 +433,18 @@ pub const Parser = struct {
         return Expression{ .prefix = expr };
     }
 
+    fn parseInfixExpression(self: *Self, left: Expression) !Expression {
+        var expr = try self.allocator.create(InfixExpression);
+        expr.left = left;
+        expr.operator = self.curr_t;
+
+        const p = self.currPresedence();
+        self.nextToken();
+        expr.right = try self.parseExpression(p);
+
+        return Expression{ .infix = expr };
+    }
+
     fn expectPeek(self: *Self, tag: []const u8) !bool {
         if (std.mem.eql(u8, self.peek_t.tag(), tag)) {
             self.nextToken();
@@ -353,6 +458,14 @@ pub const Parser = struct {
     fn nextToken(self: *Self) void {
         self.curr_t = self.peek_t;
         self.peek_t = self.lex.nextToken();
+    }
+
+    fn currPresedence(self: Self) Presedence {
+        return mapPresedence(self.curr_t);
+    }
+
+    fn peekPresedence(self: Self) Presedence {
+        return mapPresedence(self.peek_t);
     }
 };
 
@@ -470,7 +583,7 @@ test "integers" {
     }
 }
 
-fn testPrefixExpression(
+fn testStatement(
     input: []const u8,
     expected: Statement,
 ) !void {
@@ -520,6 +633,172 @@ test "prefix expression" {
     };
 
     for (input, 0..) |value, i| {
-        try testPrefixExpression(value, expected[i]);
+        try testStatement(value, expected[i]);
+    }
+}
+
+fn infixExpression(opr: l.Token, left: Expression, right: Expression) !Expression {
+    var expr = try t_allocator.create(InfixExpression);
+    expr.operator = opr;
+    expr.left = left;
+    expr.right = right;
+    return Expression{ .infix = expr };
+}
+
+test "infix expressions" {
+    const input = [_][]const u8{
+        "5 + 5;",
+        "5 - 5;",
+        "5 * 5;",
+        "5 / 5;",
+        "5 > 5;",
+        "5 >= 5;",
+        "5 < 5;",
+        "5 <= 5;",
+        "5 == 5;",
+        "5 != 5;",
+    };
+
+    const expected = [_]Statement{
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.plus, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.minus, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.asterisk, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.slash, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.gt, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.gte, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.lt, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.lte, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.eq, expr, expr);
+                break :blk stmt;
+            },
+        },
+        Statement{
+            .expr_statement = blk: {
+                var stmt = try t_allocator.create(ExpressionStatement);
+                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                stmt.value = try infixExpression(l.Token.noteq, expr, expr);
+                break :blk stmt;
+            },
+        },
+    };
+
+    defer for (expected) |stmt| {
+        stmt.deinit(t_allocator);
+    };
+
+    for (input, 0..) |value, i| {
+        try testStatement(value, expected[i]);
+    }
+}
+
+fn testStatementString(input: []const u8, output: []const u8) !void {
+    var lex = l.Lexer.init(input);
+    var parser = try Parser.init(t_allocator, lex);
+    defer parser.deinit();
+
+    var program = try parser.parse();
+    defer program.destroy();
+
+    const errors_len: u64 = @as(u64, parser.errors.items.len);
+
+    try t.expect(errors_len == 0);
+
+    const stmt_str = try std.fmt.allocPrint(t_allocator, "{s}", .{program});
+    defer t_allocator.free(stmt_str);
+
+    try t.expectEqualStrings(output, stmt_str);
+}
+
+test "complex infix expressions" {
+    const input = [_][]const u8{
+        "-a * b",
+        "!-a",
+        "a + b + c",
+        "a + b - c",
+        "a * b * c",
+        "a * b / c",
+        "a + b * c + d / e - f",
+        "3 + 4; -5 * 5",
+        "5 > 4 == 3 < 4",
+        "5 >= 4 != 3 <= 4",
+        "3 + 4 * 5 == 3 * 1 + 4 * 5;",
+    };
+
+    const output = [_][]const u8{
+        "((-a) * b)",
+        "(!(-a))",
+        "((a + b) + c)",
+        "((a + b) - c)",
+        "((a * b) * c)",
+        "((a * b) / c)",
+        "(((a + (b * c)) + (d / e)) - f)",
+        "(3 + 4)((-5) * 5)",
+        "((5 > 4) == (3 < 4))",
+        "((5 >= 4) != (3 <= 4))",
+        "((3 + (4 * 5)) == ((3 * 1) + (4 * 5)))",
+    };
+
+    for (input, 0..) |value, i| {
+        try testStatementString(value, output[i]);
     }
 }

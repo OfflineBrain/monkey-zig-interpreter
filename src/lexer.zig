@@ -79,7 +79,7 @@ pub const Token = union(enum) {
             .lt => "<",
             .lte => "<=",
             .eq => "==",
-            .noteq => "!.",
+            .noteq => "!=",
             .if_literal => "if",
             .else_literal => "else",
             .return_literal => "return",
@@ -162,8 +162,8 @@ pub const Lexer = struct {
             } else .lt,
             0 => .eof,
 
-            'a'...'z', 'A'...'Z', '_' => Token.keyword(self.readIdentifier()),
-            '0'...'9' => .{ .int = self.readInt() },
+            'a'...'z', 'A'...'Z', '_' => return Token.keyword(self.readIdentifier()),
+            '0'...'9' => return .{ .int = self.readInt() },
             else => .illegal,
         };
 
@@ -181,21 +181,21 @@ pub const Lexer = struct {
     fn readIdentifier(self: *Self) []const u8 {
         const position = self.position;
 
-        while (isLetter(self.input[self.read_position])) {
+        while (isLetter(self.ch)) {
             self.readChar();
         }
 
-        return self.input[position..self.read_position];
+        return self.input[position..self.position];
     }
 
     fn readInt(self: *Self) []const u8 {
         const position = self.position;
 
-        while (isInt(self.input[self.read_position])) {
+        while (isInt(self.ch)) {
             self.readChar();
         }
 
-        return self.input[position..self.read_position];
+        return self.input[position..self.position];
     }
 
     fn readChar(self: *Self) void {
@@ -206,7 +206,7 @@ pub const Lexer = struct {
         }
 
         self.position = self.read_position;
-        self.read_position = self.read_position + 1;
+        self.read_position += 1;
     }
 
     fn peekChar(self: Self) u8 {
@@ -350,6 +350,11 @@ test "if (x < y) { x } else { y }" {
 
         try std.testing.expectEqualDeep(expected_token, actual_token);
     }
+}
+
+test "0 char" {
+    try std.testing.expect(isLetter(0) == false);
+    try std.testing.expect(isInt(0) == false);
 }
 
 test "tag" {
