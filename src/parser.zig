@@ -54,6 +54,7 @@ const Expression = union(enum) {
     prefix: *PrefixExpression,
     infix: *InfixExpression,
     ifelse: *IfExpression,
+    function: *Function,
     default,
     fn deinit(self: Expression, a: std.mem.Allocator) void {
         switch (self) {
@@ -66,6 +67,10 @@ const Expression = union(enum) {
                 a.destroy(expr);
             },
             .ifelse => |expr| {
+                expr.deinit(a);
+                a.destroy(expr);
+            },
+            .function => |expr| {
                 expr.deinit(a);
                 a.destroy(expr);
             },
@@ -88,6 +93,7 @@ const Expression = union(enum) {
             .prefix => |e| try writer.print("{s}", .{e}),
             .infix => |e| try writer.print("{s}", .{e}),
             .ifelse => |e| try writer.print("{s}", .{e}),
+            .function => |e| try writer.print("{s}", .{e}),
             .default => try writer.print("DEFAULT", .{}),
         }
     }
@@ -253,6 +259,33 @@ const Boolean = struct {
     }
 };
 
+const Function = struct {
+    const Self = @This();
+    parameters: std.ArrayList(Identifier),
+    body: Statement,
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("fn(", .{});
+
+        for (0..(self.parameters.items.len - 1)) |idx| {
+            try writer.print("{s}, ", .{self.parameters.items[idx]});
+        }
+        try writer.print("{s} {s}", .{ self.parameters.getLast(), self.body });
+    }
+
+    fn deinit(self: Self, a: std.mem.Allocator) void {
+        self.body.deinit(a);
+        self.parameters.deinit();
+    }
+};
+
 const PrefixExpression = struct {
     const Self = @This();
     operator: l.Token,
@@ -382,6 +415,10 @@ pub const Parser = struct {
             .infixFn = std.StringHashMap(*const InfixExprFn).init(allocator),
         };
 
+        errdefer p.errors.deinit();
+        errdefer p.prefixFn.deinit();
+        errdefer p.infixFn.deinit();
+
         try p.prefixFn.put("ident", &parseIdentifier);
         try p.prefixFn.put("int", &parseInteger);
         try p.prefixFn.put("bang", &parsePrefixExpression);
@@ -390,6 +427,7 @@ pub const Parser = struct {
         try p.prefixFn.put("false_literal", &parseBoolean);
         try p.prefixFn.put("lparen", &parseGroupedExpression);
         try p.prefixFn.put("if_literal", &parseIfExpression);
+        try p.prefixFn.put("fn_literal", &parseFunction);
 
         try p.infixFn.put("plus", &parseInfixExpression);
         try p.infixFn.put("minus", &parseInfixExpression);
@@ -415,6 +453,7 @@ pub const Parser = struct {
 
     pub fn parse(self: *Self) !Program {
         var statements = std.ArrayList(Statement).init(self.allocator);
+        errdefer statements.deinit();
 
         while (self.curr_t != l.Token.eof) {
             try statements.append(try self.parseStatement());
@@ -450,6 +489,8 @@ pub const Parser = struct {
         self.nextToken();
 
         var stmt = try self.allocator.create(LetStatement);
+        errdefer self.allocator.destroy(stmt);
+        errdefer stmt.deinit(self.allocator);
         stmt.identifier = name;
         stmt.value = try self.parseExpression(.lowest);
 
@@ -464,6 +505,8 @@ pub const Parser = struct {
         self.nextToken();
 
         var stmt = try self.allocator.create(ReturnStatment);
+        errdefer self.allocator.destroy(stmt);
+        errdefer stmt.deinit(self.allocator);
         stmt.value = try self.parseExpression(.lowest);
 
         if (self.peek_t == l.Token.semicolon) {
@@ -481,6 +524,9 @@ pub const Parser = struct {
         }
 
         var stmt = try self.allocator.create(ExpressionStatement);
+        errdefer self.allocator.destroy(stmt);
+        errdefer stmt.deinit(self.allocator);
+
         stmt.value = expr;
         return Statement{ .expr_statement = stmt };
     }
@@ -488,6 +534,7 @@ pub const Parser = struct {
     fn parseBlockStatement(self: *Self) !Statement {
         self.nextToken();
         var stmts = std.ArrayList(Statement).init(self.allocator);
+        errdefer stmts.deinit();
 
         while (self.curr_t != l.Token.rbrace and self.curr_t != l.Token.eof) {
             try stmts.append(try self.parseStatement());
@@ -495,6 +542,8 @@ pub const Parser = struct {
         }
 
         var stmt = try self.allocator.create(BlockStatement);
+        errdefer self.allocator.destroy(stmt);
+        errdefer stmt.deinit(self.allocator);
         stmt.statements = stmts;
 
         return Statement{ .block_statement = stmt };
@@ -537,6 +586,8 @@ pub const Parser = struct {
 
     fn parsePrefixExpression(self: *Self) !Expression {
         var expr = try self.allocator.create(PrefixExpression);
+        errdefer self.allocator.destroy(expr);
+        errdefer expr.deinit(self.allocator);
         expr.operator = self.curr_t;
 
         self.nextToken();
@@ -548,6 +599,8 @@ pub const Parser = struct {
 
     fn parseInfixExpression(self: *Self, left: Expression) !Expression {
         var expr = try self.allocator.create(InfixExpression);
+        errdefer self.allocator.destroy(expr);
+        errdefer expr.deinit(self.allocator);
         expr.left = left;
         expr.operator = self.curr_t;
 
@@ -573,6 +626,8 @@ pub const Parser = struct {
         self.nextToken();
 
         var expr = try self.allocator.create(IfExpression);
+        errdefer self.allocator.destroy(expr);
+        errdefer expr.deinit(self.allocator);
         expr.condition = try self.parseExpression(.lowest);
 
         if (!try self.expectPeek("rparen")) {
@@ -591,6 +646,50 @@ pub const Parser = struct {
         }
 
         return Expression{ .ifelse = expr };
+    }
+
+    fn parseFunction(self: *Self) !Expression {
+        if (!try self.expectPeek("lparen")) {
+            return Err.UnexpectedToken;
+        }
+        var expr = try self.allocator.create(Function);
+        errdefer self.allocator.destroy(expr);
+        errdefer expr.deinit(self.allocator);
+
+        expr.parameters = try self.parseFunctionParameters();
+
+        self.nextToken();
+
+        expr.body = try self.parseStatement();
+
+        return Expression{ .function = expr };
+    }
+
+    fn parseFunctionParameters(self: *Self) !std.ArrayList(Identifier) {
+        var prms = std.ArrayList(Identifier).init(self.allocator);
+        errdefer prms.deinit();
+
+        if (self.peek_t == l.Token.rparen) {
+            self.nextToken();
+            return prms;
+        }
+
+        self.nextToken();
+
+        try prms.append(Identifier{ .token = self.curr_t });
+
+        while (self.peek_t == l.Token.comma) {
+            self.nextToken();
+            self.nextToken();
+
+            try prms.append(Identifier{ .token = self.curr_t });
+        }
+
+        if (!try self.expectPeek("rparen")) {
+            return Err.UnexpectedToken;
+        }
+
+        return prms;
     }
 
     fn expectPeek(self: *Self, tag: []const u8) !bool {
