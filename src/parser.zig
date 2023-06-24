@@ -55,6 +55,7 @@ const Expression = union(enum) {
     infix: *InfixExpression,
     ifelse: *IfExpression,
     function: *Function,
+    call: *CallExpresson,
     default,
     fn deinit(self: Expression, a: std.mem.Allocator) void {
         switch (self) {
@@ -71,6 +72,10 @@ const Expression = union(enum) {
                 a.destroy(expr);
             },
             .function => |expr| {
+                expr.deinit(a);
+                a.destroy(expr);
+            },
+            .call => |expr| {
                 expr.deinit(a);
                 a.destroy(expr);
             },
@@ -94,6 +99,7 @@ const Expression = union(enum) {
             .infix => |e| try writer.print("{s}", .{e}),
             .ifelse => |e| try writer.print("{s}", .{e}),
             .function => |e| try writer.print("{s}", .{e}),
+            .call => |e| try writer.print("{s}", .{e}),
             .default => try writer.print("DEFAULT", .{}),
         }
     }
@@ -277,7 +283,7 @@ const Function = struct {
         for (0..(self.parameters.items.len - 1)) |idx| {
             try writer.print("{s}, ", .{self.parameters.items[idx]});
         }
-        try writer.print("{s} {s}", .{ self.parameters.getLast(), self.body });
+        try writer.print("{s}) {s}", .{ self.parameters.getLast(), self.body });
     }
 
     fn deinit(self: Self, a: std.mem.Allocator) void {
@@ -360,6 +366,36 @@ const IfExpression = struct {
     }
 };
 
+const CallExpresson = struct {
+    const Self = @This();
+    function: Expression,
+    args: std.ArrayList(Expression),
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("{s}(", .{self.function});
+
+        for (0..(self.parameters.items.len - 1)) |idx| {
+            try writer.print("{s}, ", .{self.args.items[idx]});
+        }
+        try writer.print("{s})", .{self.args.getLast()});
+    }
+
+    fn deinit(self: Self, a: std.mem.Allocator) void {
+        defer self.function.deinit(a);
+        defer self.args.deinit();
+        defer for (self.args.items) |value| {
+            value.deinit(a);
+        };
+    }
+};
+
 const Err = error{
     Parse,
     UnexpectedToken,
@@ -389,6 +425,7 @@ fn mapPresedence(token: l.Token) Presedence {
         .lt, .lte, .gt, .gte => .ltgt,
         .plus, .minus => .sum,
         .asterisk, .slash => .product,
+        .lparen => .call,
         else => .lowest,
     };
 }
@@ -439,6 +476,7 @@ pub const Parser = struct {
         try p.infixFn.put("lte", &parseInfixExpression);
         try p.infixFn.put("gt", &parseInfixExpression);
         try p.infixFn.put("gte", &parseInfixExpression);
+        try p.infixFn.put("lparen", &parseCallExpression);
 
         p.nextToken();
         p.nextToken();
@@ -690,6 +728,43 @@ pub const Parser = struct {
         }
 
         return prms;
+    }
+
+    fn parseCallExpression(self: *Self, function: Expression) !Expression {
+        var expr = try self.allocator.create(CallExpresson);
+        errdefer self.allocator.destroy(expr);
+        errdefer expr.deinit(self.allocator);
+
+        expr.function = function;
+        expr.args = try self.parseCallArguments();
+
+        return Expression{ .call = expr };
+    }
+
+    fn parseCallArguments(self: *Self) !std.ArrayList(Expression) {
+        var args = std.ArrayList(Expression).init(self.allocator);
+        errdefer args.deinit();
+
+        if (self.peek_t == l.Token.rparen) {
+            self.nextToken();
+            return args;
+        }
+        self.nextToken();
+
+        try args.append(try self.parseExpression(.lowest));
+
+        while (self.peek_t == l.Token.comma) {
+            self.nextToken();
+            self.nextToken();
+
+            try args.append(try self.parseExpression(.lowest));
+        }
+
+        if (!try self.expectPeek("rparen")) {
+            return Err.UnexpectedToken;
+        }
+
+        return args;
     }
 
     fn expectPeek(self: *Self, tag: []const u8) !bool {
