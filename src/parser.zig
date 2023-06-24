@@ -5,6 +5,7 @@ const Statement = union(enum) {
     let_statement: *LetStatement,
     return_statement: *ReturnStatment,
     expr_statement: *ExpressionStatement,
+    block_statement: *BlockStatement,
 
     fn deinit(self: Statement, a: std.mem.Allocator) void {
         switch (self) {
@@ -17,6 +18,10 @@ const Statement = union(enum) {
                 a.destroy(value);
             },
             .expr_statement => |value| {
+                value.deinit(a);
+                a.destroy(value);
+            },
+            .block_statement => |value| {
                 value.deinit(a);
                 a.destroy(value);
             },
@@ -35,6 +40,7 @@ const Statement = union(enum) {
             .let_statement => |e| try writer.print("{s}", .{e}),
             .return_statement => |e| try writer.print("{s}", .{e}),
             .expr_statement => |e| try writer.print("{s}", .{e}),
+            .block_statement => |e| try writer.print("{s}", .{e}),
         }
     }
 };
@@ -44,8 +50,10 @@ const Expression = union(enum) {
 
     identifier: Identifier,
     integer: Integer,
+    boolean: Boolean,
     prefix: *PrefixExpression,
     infix: *InfixExpression,
+    ifelse: *IfExpression,
     default,
     fn deinit(self: Expression, a: std.mem.Allocator) void {
         switch (self) {
@@ -54,6 +62,10 @@ const Expression = union(enum) {
                 a.destroy(expr);
             },
             .infix => |expr| {
+                expr.deinit(a);
+                a.destroy(expr);
+            },
+            .ifelse => |expr| {
                 expr.deinit(a);
                 a.destroy(expr);
             },
@@ -72,9 +84,11 @@ const Expression = union(enum) {
         switch (self) {
             .identifier => |e| try writer.print("{s}", .{e}),
             .integer => |e| try writer.print("{s}", .{e}),
+            .boolean => |e| try writer.print("{s}", .{e}),
             .prefix => |e| try writer.print("{s}", .{e}),
             .infix => |e| try writer.print("{s}", .{e}),
-            else => try writer.print("DEFAULT", .{}),
+            .ifelse => |e| try writer.print("{s}", .{e}),
+            .default => try writer.print("DEFAULT", .{}),
         }
     }
 };
@@ -86,7 +100,7 @@ const Program = struct {
     pub fn destroy(program: *Program) void {
         defer program.statements.deinit();
         defer for (program.statements.items) |value| {
-            value.deinit(t_allocator);
+            value.deinit(program.allocator);
         };
     }
 
@@ -166,6 +180,31 @@ const ExpressionStatement = struct {
     }
 };
 
+const BlockStatement = struct {
+    const Self = @This();
+    statements: std.ArrayList(Statement),
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        for (self.statements.items) |value| {
+            try writer.print("{s}", .{value});
+        }
+    }
+
+    fn deinit(self: Self, a: std.mem.Allocator) void {
+        defer self.statements.deinit();
+        defer for (self.statements.items) |value| {
+            value.deinit(a);
+        };
+    }
+};
+
 const Identifier = struct {
     const Self = @This();
     token: l.Token,
@@ -183,6 +222,22 @@ const Identifier = struct {
 };
 
 const Integer = struct {
+    const Self = @This();
+    token: l.Token,
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("{s}", .{self.token});
+    }
+};
+
+const Boolean = struct {
     const Self = @This();
     token: l.Token,
 
@@ -242,14 +297,44 @@ const InfixExpression = struct {
     }
 };
 
+const IfExpression = struct {
+    const Self = @This();
+
+    condition: Expression,
+    consequence: Statement,
+    alternative: ?Statement,
+
+    pub fn format(
+        self: Self,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = fmt;
+        try writer.print("(if {s} {s})", .{ self.condition, self.consequence });
+        if (self.alternative) |alternative| {
+            try writer.print(" else {s}", .{alternative});
+        }
+    }
+
+    fn deinit(self: Self, a: std.mem.Allocator) void {
+        self.condition.deinit(a);
+        self.consequence.deinit(a);
+        if (self.alternative) |alternative| {
+            alternative.deinit(a);
+        }
+    }
+};
+
 const Err = error{
     Parse,
     UnexpectedToken,
     UnexpectedStatement,
-};
+} || std.mem.Allocator.Error;
 
-const PrefixExprFn = fn (*Parser) std.mem.Allocator.Error!Expression;
-const InfixExprFn = fn (*Parser, Expression) std.mem.Allocator.Error!Expression;
+const PrefixExprFn = fn (*Parser) Err!Expression;
+const InfixExprFn = fn (*Parser, Expression) Err!Expression;
 
 const Presedence = enum(u8) {
     lowest = 0,
@@ -301,6 +386,10 @@ pub const Parser = struct {
         try p.prefixFn.put("int", &parseInteger);
         try p.prefixFn.put("bang", &parsePrefixExpression);
         try p.prefixFn.put("minus", &parsePrefixExpression);
+        try p.prefixFn.put("true_literal", &parseBoolean);
+        try p.prefixFn.put("false_literal", &parseBoolean);
+        try p.prefixFn.put("lparen", &parseGroupedExpression);
+        try p.prefixFn.put("if_literal", &parseIfExpression);
 
         try p.infixFn.put("plus", &parseInfixExpression);
         try p.infixFn.put("minus", &parseInfixExpression);
@@ -342,26 +431,29 @@ pub const Parser = struct {
         switch (self.curr_t) {
             l.Token.let_literal => return self.parseLetStatement(),
             l.Token.return_literal => return self.parseReturnStatement(),
+            l.Token.lbrace => return self.parseBlockStatement(),
             else => return self.parseExpressionStatement(),
         }
     }
 
     fn parseLetStatement(self: *Self) !Statement {
         if (!try self.expectPeek("ident")) {
-            return Err.Parse;
+            return Err.UnexpectedToken;
         }
 
         const name = Identifier{ .token = self.curr_t };
 
         if (!try self.expectPeek("assign")) {
-            return Err.Parse;
+            return Err.UnexpectedToken;
         }
+
+        self.nextToken();
 
         var stmt = try self.allocator.create(LetStatement);
         stmt.identifier = name;
-        stmt.value = Expression.default;
+        stmt.value = try self.parseExpression(.lowest);
 
-        while (self.curr_t != l.Token.semicolon) {
+        if (self.peek_t == l.Token.semicolon) {
             self.nextToken();
         }
 
@@ -372,8 +464,9 @@ pub const Parser = struct {
         self.nextToken();
 
         var stmt = try self.allocator.create(ReturnStatment);
+        stmt.value = try self.parseExpression(.lowest);
 
-        while (self.curr_t != l.Token.semicolon) {
+        if (self.peek_t == l.Token.semicolon) {
             self.nextToken();
         }
 
@@ -392,7 +485,23 @@ pub const Parser = struct {
         return Statement{ .expr_statement = stmt };
     }
 
+    fn parseBlockStatement(self: *Self) !Statement {
+        self.nextToken();
+        var stmts = std.ArrayList(Statement).init(self.allocator);
+
+        while (self.curr_t != l.Token.rbrace and self.curr_t != l.Token.eof) {
+            try stmts.append(try self.parseStatement());
+            self.nextToken();
+        }
+
+        var stmt = try self.allocator.create(BlockStatement);
+        stmt.statements = stmts;
+
+        return Statement{ .block_statement = stmt };
+    }
+
     fn parseExpression(self: *Self, presedence: Presedence) !Expression {
+        // std.debug.print("{s}\n", .{self.curr_t});
         const prefix = self.prefixFn.get(self.curr_t.tag());
         var left = if (prefix) |func| blk: {
             break :blk try func(self);
@@ -406,7 +515,7 @@ pub const Parser = struct {
                 self.nextToken();
                 break :blk try func(self, left);
             } else {
-                return Expression.default;
+                return left;
             };
         }
 
@@ -420,6 +529,10 @@ pub const Parser = struct {
 
     fn parseInteger(self: *Self) !Expression {
         return Expression{ .integer = Integer{ .token = self.curr_t } };
+    }
+
+    fn parseBoolean(self: *Self) !Expression {
+        return Expression{ .boolean = Boolean{ .token = self.curr_t } };
     }
 
     fn parsePrefixExpression(self: *Self) !Expression {
@@ -443,6 +556,41 @@ pub const Parser = struct {
         expr.right = try self.parseExpression(p);
 
         return Expression{ .infix = expr };
+    }
+
+    fn parseGroupedExpression(self: *Self) !Expression {
+        self.nextToken();
+        const expr = try self.parseExpression(.lowest);
+        _ = try self.expectPeek("rparen");
+        return expr;
+    }
+
+    fn parseIfExpression(self: *Self) !Expression {
+        if (!try self.expectPeek("lparen")) {
+            return Err.UnexpectedToken;
+        }
+
+        self.nextToken();
+
+        var expr = try self.allocator.create(IfExpression);
+        expr.condition = try self.parseExpression(.lowest);
+
+        if (!try self.expectPeek("rparen")) {
+            return Err.UnexpectedToken;
+        }
+
+        self.nextToken();
+
+        expr.consequence = try self.parseStatement();
+
+        if (self.peek_t == l.Token.else_literal) {
+            self.nextToken();
+            self.nextToken();
+
+            expr.alternative = try self.parseStatement();
+        }
+
+        return Expression{ .ifelse = expr };
     }
 
     fn expectPeek(self: *Self, tag: []const u8) !bool {
@@ -473,10 +621,10 @@ const t = std.testing;
 const t_allocator = t.allocator;
 const expectEqualDeep = @import("testing/eql.zig").expectEqualDeep;
 
-fn letStatement(a: std.mem.Allocator, identifier: []const u8) !Statement {
+fn letStatement(a: std.mem.Allocator, identifier: []const u8, value: []const u8) !Statement {
     var statement = try a.create(LetStatement);
     statement.identifier = Identifier{ .token = l.Token{ .ident = identifier } };
-    statement.value = Expression.default;
+    statement.value = Expression{ .integer = Integer{ .token = l.Token{ .int = value } } };
 
     return Statement{ .let_statement = statement };
 }
@@ -511,9 +659,9 @@ test "let statement" {
     try t.expect(errors_len == 0);
 
     const expected_statements = [_]Statement{
-        try letStatement(t_allocator, "x"),
-        try letStatement(t_allocator, "y"),
-        try letStatement(t_allocator, "foobar"),
+        try letStatement(t_allocator, "x", "5"),
+        try letStatement(t_allocator, "y", "10"),
+        try letStatement(t_allocator, "foobar", "83834"),
     };
 
     defer for (expected_statements) |value| {
