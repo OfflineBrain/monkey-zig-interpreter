@@ -1,7 +1,7 @@
 const l = @import("lexer.zig");
 const std = @import("std");
 
-const Statement = union(enum) {
+pub const Statement = union(enum) {
     let_statement: *LetStatement,
     return_statement: *ReturnStatment,
     expr_statement: *ExpressionStatement,
@@ -45,7 +45,7 @@ const Statement = union(enum) {
     }
 };
 
-const Expression = union(enum) {
+pub const Expression = union(enum) {
     const Self = @This();
 
     identifier: Identifier,
@@ -105,7 +105,7 @@ const Expression = union(enum) {
     }
 };
 
-const Program = struct {
+pub const Program = struct {
     statements: std.ArrayList(Statement),
     allocator: std.mem.Allocator,
 
@@ -131,7 +131,7 @@ const Program = struct {
     }
 };
 
-const LetStatement = struct {
+pub const LetStatement = struct {
     const Self = @This();
     identifier: Identifier,
     value: Expression,
@@ -152,7 +152,7 @@ const LetStatement = struct {
     }
 };
 
-const ReturnStatment = struct {
+pub const ReturnStatment = struct {
     const Self = @This();
     value: Expression,
 
@@ -172,7 +172,7 @@ const ReturnStatment = struct {
     }
 };
 
-const ExpressionStatement = struct {
+pub const ExpressionStatement = struct {
     const Self = @This();
     value: Expression,
 
@@ -192,7 +192,7 @@ const ExpressionStatement = struct {
     }
 };
 
-const BlockStatement = struct {
+pub const BlockStatement = struct {
     const Self = @This();
     statements: std.ArrayList(Statement),
 
@@ -217,7 +217,7 @@ const BlockStatement = struct {
     }
 };
 
-const Identifier = struct {
+pub const Identifier = struct {
     const Self = @This();
     token: l.Token,
 
@@ -233,9 +233,9 @@ const Identifier = struct {
     }
 };
 
-const Integer = struct {
+pub const Integer = struct {
     const Self = @This();
-    token: l.Token,
+    value: i64,
 
     pub fn format(
         self: Self,
@@ -245,13 +245,13 @@ const Integer = struct {
     ) !void {
         _ = options;
         _ = fmt;
-        try writer.print("{s}", .{self.token});
+        try writer.print("{d}", .{self.value});
     }
 };
 
-const Boolean = struct {
+pub const Boolean = struct {
     const Self = @This();
-    token: l.Token,
+    value: bool,
 
     pub fn format(
         self: Self,
@@ -261,11 +261,11 @@ const Boolean = struct {
     ) !void {
         _ = options;
         _ = fmt;
-        try writer.print("{s}", .{self.token});
+        try writer.print("{}", .{self.value});
     }
 };
 
-const Function = struct {
+pub const Function = struct {
     const Self = @This();
     parameters: std.ArrayList(Identifier),
     body: Statement,
@@ -292,7 +292,7 @@ const Function = struct {
     }
 };
 
-const PrefixExpression = struct {
+pub const PrefixExpression = struct {
     const Self = @This();
     operator: l.Token,
     right: Expression,
@@ -313,7 +313,7 @@ const PrefixExpression = struct {
     }
 };
 
-const InfixExpression = struct {
+pub const InfixExpression = struct {
     const Self = @This();
     operator: l.Token,
     left: Expression,
@@ -336,7 +336,7 @@ const InfixExpression = struct {
     }
 };
 
-const IfExpression = struct {
+pub const IfExpression = struct {
     const Self = @This();
 
     condition: Expression,
@@ -366,7 +366,7 @@ const IfExpression = struct {
     }
 };
 
-const CallExpresson = struct {
+pub const CallExpresson = struct {
     const Self = @This();
     function: Expression,
     args: std.ArrayList(Expression),
@@ -381,10 +381,13 @@ const CallExpresson = struct {
         _ = fmt;
         try writer.print("{s}(", .{self.function});
 
-        for (0..(self.parameters.items.len - 1)) |idx| {
-            try writer.print("{s}, ", .{self.args.items[idx]});
+        if (self.args.items.len != 0) {
+            for (0..(self.args.items.len - 1)) |idx| {
+                try writer.print("{s}, ", .{self.args.items[idx]});
+            }
+            try writer.print("{s}", .{self.args.getLast()});
         }
-        try writer.print("{s})", .{self.args.getLast()});
+        try writer.print(")", .{});
     }
 
     fn deinit(self: Self, a: std.mem.Allocator) void {
@@ -400,7 +403,7 @@ const Err = error{
     Parse,
     UnexpectedToken,
     UnexpectedStatement,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.fmt.ParseIntError;
 
 const PrefixExprFn = fn (*Parser) Err!Expression;
 const InfixExprFn = fn (*Parser, Expression) Err!Expression;
@@ -615,11 +618,15 @@ pub const Parser = struct {
     }
 
     fn parseInteger(self: *Self) !Expression {
-        return Expression{ .integer = Integer{ .token = self.curr_t } };
+        return Expression{ .integer = Integer{ .value = try std.fmt.parseInt(i64, self.curr_t.int, 0) } };
     }
 
     fn parseBoolean(self: *Self) !Expression {
-        return Expression{ .boolean = Boolean{ .token = self.curr_t } };
+        return Expression{ .boolean = Boolean{ .value = switch (self.curr_t) {
+            .true_literal => true,
+            .false_literal => false,
+            else => unreachable,
+        } } };
     }
 
     fn parsePrefixExpression(self: *Self) !Expression {
@@ -798,7 +805,7 @@ const expectEqualDeep = @import("testing/eql.zig").expectEqualDeep;
 fn letStatement(a: std.mem.Allocator, identifier: []const u8, value: []const u8) !Statement {
     var statement = try a.create(LetStatement);
     statement.identifier = Identifier{ .token = l.Token{ .ident = identifier } };
-    statement.value = Expression{ .integer = Integer{ .token = l.Token{ .int = value } } };
+    statement.value = Expression{ .integer = Integer{ .value = try std.fmt.parseInt(i64, value, 0) } };
 
     return Statement{ .let_statement = statement };
 }
@@ -893,7 +900,7 @@ test "integers" {
     try t.expect(statements_len == 1);
 
     const expected_statements = [_]Statement{
-        try exprStatement(t_allocator, Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } }),
+        try exprStatement(t_allocator, Expression{ .integer = Integer{ .value = 5 } }),
     };
 
     defer for (expected_statements) |value| {
@@ -933,7 +940,7 @@ test "prefix expression" {
                 var stmt = try t_allocator.create(ExpressionStatement);
                 var expr = try t_allocator.create(PrefixExpression);
                 expr.operator = l.Token.bang;
-                expr.right = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                expr.right = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = Expression{ .prefix = expr };
                 break :blk stmt;
             },
@@ -943,7 +950,7 @@ test "prefix expression" {
                 var stmt = try t_allocator.create(ExpressionStatement);
                 var expr = try t_allocator.create(PrefixExpression);
                 expr.operator = l.Token.minus;
-                expr.right = Expression{ .integer = Integer{ .token = l.Token{ .int = "15" } } };
+                expr.right = Expression{ .integer = Integer{ .value = 15 } };
                 stmt.value = Expression{ .prefix = expr };
                 break :blk stmt;
             },
@@ -985,7 +992,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.plus, expr, expr);
                 break :blk stmt;
             },
@@ -993,7 +1000,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.minus, expr, expr);
                 break :blk stmt;
             },
@@ -1001,7 +1008,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.asterisk, expr, expr);
                 break :blk stmt;
             },
@@ -1009,7 +1016,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.slash, expr, expr);
                 break :blk stmt;
             },
@@ -1017,7 +1024,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.gt, expr, expr);
                 break :blk stmt;
             },
@@ -1025,7 +1032,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.gte, expr, expr);
                 break :blk stmt;
             },
@@ -1033,7 +1040,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.lt, expr, expr);
                 break :blk stmt;
             },
@@ -1041,7 +1048,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.lte, expr, expr);
                 break :blk stmt;
             },
@@ -1049,7 +1056,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.eq, expr, expr);
                 break :blk stmt;
             },
@@ -1057,7 +1064,7 @@ test "infix expressions" {
         Statement{
             .expr_statement = blk: {
                 var stmt = try t_allocator.create(ExpressionStatement);
-                var expr = Expression{ .integer = Integer{ .token = l.Token{ .int = "5" } } };
+                var expr = Expression{ .integer = Integer{ .value = 5 } };
                 stmt.value = try infixExpression(l.Token.noteq, expr, expr);
                 break :blk stmt;
             },
