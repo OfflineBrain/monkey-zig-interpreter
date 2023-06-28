@@ -28,6 +28,15 @@ pub const Statement = union(enum) {
         }
     }
 
+    pub fn clone(self: Statement, a: std.mem.Allocator) std.mem.Allocator.Error!Statement {
+        switch (self) {
+            .let_statement => |value| return Statement{ .let_statement = try value.clone(a) },
+            .return_statement => |value| return Statement{ .return_statement = try value.clone(a) },
+            .expr_statement => |value| return Statement{ .expr_statement = try value.clone(a) },
+            .block_statement => |value| return Statement{ .block_statement = try value.clone(a) },
+        }
+    }
+
     pub fn format(
         self: Statement,
         comptime fmt: []const u8,
@@ -57,7 +66,7 @@ pub const Expression = union(enum) {
     function: *Function,
     call: *CallExpresson,
     default,
-    fn deinit(self: Expression, a: std.mem.Allocator) void {
+    fn deinit(self: Self, a: std.mem.Allocator) void {
         switch (self) {
             .prefix => |expr| {
                 expr.deinit(a);
@@ -80,6 +89,17 @@ pub const Expression = union(enum) {
                 a.destroy(expr);
             },
             else => {},
+        }
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!Expression {
+        switch (self) {
+            .identifier, .integer, .boolean, .default => return self,
+            .prefix => |value| return Expression{ .prefix = try value.clone(a) },
+            .infix => |value| return Expression{ .infix = try value.clone(a) },
+            .ifelse => |value| return Expression{ .ifelse = try value.clone(a) },
+            .function => |value| return Expression{ .function = try value.clone(a) },
+            .call => |value| return Expression{ .call = try value.clone(a) },
         }
     }
 
@@ -150,6 +170,13 @@ pub const LetStatement = struct {
     fn deinit(self: Self, a: std.mem.Allocator) void {
         self.value.deinit(a);
     }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.identifier = self.identifier;
+        expr.value = try self.value.clone(a);
+        return expr;
+    }
 };
 
 pub const ReturnStatment = struct {
@@ -170,6 +197,12 @@ pub const ReturnStatment = struct {
     fn deinit(self: Self, a: std.mem.Allocator) void {
         self.value.deinit(a);
     }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.value = try self.value.clone(a);
+        return expr;
+    }
 };
 
 pub const ExpressionStatement = struct {
@@ -189,6 +222,12 @@ pub const ExpressionStatement = struct {
 
     fn deinit(self: Self, a: std.mem.Allocator) void {
         self.value.deinit(a);
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.value = try self.value.clone(a);
+        return expr;
     }
 };
 
@@ -214,6 +253,16 @@ pub const BlockStatement = struct {
         defer for (self.statements.items) |value| {
             value.deinit(a);
         };
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.statements = std.ArrayList(Statement).init(a);
+
+        for (self.statements.items) |value| {
+            try expr.statements.append(try value.clone(a));
+        }
+        return expr;
     }
 };
 
@@ -290,6 +339,18 @@ pub const Function = struct {
         self.body.deinit(a);
         self.parameters.deinit();
     }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.parameters = std.ArrayList(Identifier).init(a);
+
+        for (self.parameters.items) |value| {
+            try expr.parameters.append(value);
+        }
+
+        expr.body = try self.body.clone(a);
+        return expr;
+    }
 };
 
 pub const PrefixExpression = struct {
@@ -310,6 +371,13 @@ pub const PrefixExpression = struct {
 
     fn deinit(self: Self, a: std.mem.Allocator) void {
         self.right.deinit(a);
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.operator = self.operator;
+        expr.right = try self.right.clone(a);
+        return expr;
     }
 };
 
@@ -333,6 +401,14 @@ pub const InfixExpression = struct {
     fn deinit(self: Self, a: std.mem.Allocator) void {
         self.left.deinit(a);
         self.right.deinit(a);
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.operator = self.operator;
+        expr.left = try self.right.clone(a);
+        expr.right = try self.right.clone(a);
+        return expr;
     }
 };
 
@@ -363,6 +439,16 @@ pub const IfExpression = struct {
         if (self.alternative) |alternative| {
             alternative.deinit(a);
         }
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.condition = try self.condition.clone(a);
+        expr.consequence = try self.consequence.clone(a);
+        if (self.alternative) |alternative| {
+            expr.alternative = try alternative.clone(a);
+        }
+        return expr;
     }
 };
 
@@ -396,6 +482,18 @@ pub const CallExpresson = struct {
         defer for (self.args.items) |value| {
             value.deinit(a);
         };
+    }
+
+    pub fn clone(self: Self, a: std.mem.Allocator) std.mem.Allocator.Error!*Self {
+        var expr = try a.create(Self);
+        expr.args = std.ArrayList(Expression).init(a);
+
+        for (self.args.items) |value| {
+            try expr.args.append(try value.clone(a));
+        }
+
+        expr.function = try self.function.clone(a);
+        return expr;
     }
 };
 

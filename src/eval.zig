@@ -1,14 +1,14 @@
 const p = @import("parser.zig");
 const std = @import("std");
 
-const Environment = struct {
+pub const Environment = struct {
     const Self = @This();
     allocator: std.mem.Allocator,
     store: std.StringArrayHashMap(Object),
     outer: ?*Self,
     inner: std.ArrayList(*Environment),
 
-    fn init(a: std.mem.Allocator) !*Environment {
+    pub fn init(a: std.mem.Allocator) !*Environment {
         var env = try a.create(Environment);
         env.allocator = a;
         env.store = std.StringArrayHashMap(Object).init(a);
@@ -18,7 +18,7 @@ const Environment = struct {
         return env;
     }
 
-    fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self) void {
         for (self.inner.items) |inner_env| {
             inner_env.deinit();
         }
@@ -79,6 +79,13 @@ const Object = union(enum) {
             .function => |f| try writer.print("{s}", .{f}),
         }
     }
+
+    fn clone(self: Self, a: std.mem.Allocator) !Self {
+        switch (self) {
+            .function => |f| return Object{ .function = try f.clone(a) },
+            else => return self,
+        }
+    }
 };
 
 const ReturnValue = struct { value: Object };
@@ -89,8 +96,9 @@ const ErrorValue = struct {
 const Function = struct {
     const Self = @This();
 
-    parameters: std.ArrayList(p.Identifier),
-    body: p.Statement,
+    func: *p.Function,
+    // parameters: std.ArrayList(p.Identifier),
+    // body: p.Statement,
     env: *Environment,
 
     pub fn format(
@@ -106,7 +114,7 @@ const Function = struct {
     }
 };
 
-fn evalProgram(node: p.Program, env: *Environment) !Object {
+pub fn evalProgram(node: p.Program, env: *Environment) !Object {
     var result: Object = undefined;
 
     for (node.statements.items) |value| {
@@ -189,14 +197,17 @@ fn evalExpression(node: p.Expression, env: *Environment) std.mem.Allocator.Error
             }
         },
         .function => |e| {
-            const params = e.parameters;
-            const body = e.body;
+            // const params = e.parameters;
+            // const body = e.body;
 
-            return Object{ .function = Function{
-                .parameters = params,
-                .body = body,
-                .env = env,
-            } };
+            return Object{
+                .function = Function{
+                    // .parameters = params,
+                    // .body = body,
+                    .func = try e.clone(env.allocator),
+                    .env = env,
+                },
+            };
         },
         .call => |e| {
             const func = try evalExpression(e.function, env);
@@ -321,11 +332,11 @@ fn applyFunction(func: Object, args: std.ArrayList(Object), env: *Environment) s
 
     var closure = try func_obj.env.sub();
 
-    for (func_obj.parameters.items, 0..) |value, idx| {
+    for (func_obj.func.parameters.items, 0..) |value, idx| {
         try closure.set(value.token.ident, args.items[idx]);
     }
 
-    std.debug.print("Fn: {s}\n", .{func.function.body});
+    std.debug.print("Fn: {s}\n", .{func.function.func.body});
     std.debug.print("Store: {any}\n", .{closure.store.keys()});
     if (closure.outer) |outer| {
         std.debug.print("Outer: {any}\n", .{outer.store.keys()});
@@ -335,7 +346,7 @@ fn applyFunction(func: Object, args: std.ArrayList(Object), env: *Environment) s
     }
     std.debug.print("=============\n\n", .{});
 
-    const result = try evalStatement(func_obj.body, closure);
+    const result = try evalStatement(func_obj.func.body, closure);
     switch (result) {
         .return_value => |ret| return ret.value,
         else => return result,
